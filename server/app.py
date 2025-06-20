@@ -1,78 +1,122 @@
-#!/usr/bin/env python3
+from flask import Flask, request, jsonify, session
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_bcrypt import Bcrypt
+from flask_restful import Api, Resource
 
-from flask import request, session, jsonify
-from flask_restful import Resource
-from sqlalchemy.exc import IntegrityError
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'secret'
 
-from config import app, db, api
-from models import User, Recipe
+bcrypt = Bcrypt(app)
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+api = Api(app)
 
+# Models
+class User(db.Model):
+    __tablename__ = 'users'
 
-class Signup(Resource):
-    def post(self):
-        data = request.get_json()
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String, nullable=False)
+    _password_hash = db.Column(db.String, nullable=False)
+    image_url = db.Column(db.String)
+    bio = db.Column(db.String)
 
-        try:
-            user = User(
-                username=data['username'],
-                image_url=data['image_url'],
-                bio=data['bio']
-            )
-            user.password_hash = data['password']
+    recipes = db.relationship("Recipe", backref="user")
 
-            db.session.add(user)
-            db.session.commit()
+    @property
+    def password_hash(self):
+        raise AttributeError("Password hashes may not be viewed.")
 
-            session['user_id'] = user.id
+    @password_hash.setter
+    def password_hash(self, password):
+        self._password_hash = bcrypt.generate_password_hash(password.encode('utf-8')).decode('utf-8')
 
-            return user.to_dict(), 201
+    def authenticate(self, password):
+        return bcrypt.check_password_hash(self._password_hash, password.encode('utf-8'))
 
-        except IntegrityError:
-            db.session.rollback()
-            return {'errors': ['Username must be unique']}, 422
+class Recipe(db.Model):
+    __tablename__ = 'recipes'
 
-        except Exception as e:
-            return {'errors': [str(e)]}, 422
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String, nullable=False)
+    instructions = db.Column(db.String, nullable=False)
+    minutes_to_complete = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
+# Auth routes
+@app.route('/signup', methods=['POST'])
+def signup():
+    data = request.get_json()
+    try:
+        user = User(
+            username=data['username'],
+            image_url=data.get('image_url'),
+            bio=data.get('bio')
+        )
+        user.password_hash = data['password']
+        db.session.add(user)
+        db.session.commit()
+        session['user_id'] = user.id
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'image_url': user.image_url,
+            'bio': user.bio
+        }), 201
+    except:
+        return {'error': 'Unprocessable Entity'}, 422
 
-class CheckSession(Resource):
-    def get(self):
-        user_id = session.get('user_id')
-        if user_id:
-            user = User.query.filter_by(id=user_id).first()
-            if user:
-                return user.to_dict(), 200
-        return {'error': 'Unauthorized'}, 401
+@app.route('/check_session')
+def check_session():
+    user_id = session.get('user_id')
+    if user_id:
+        user = User.query.get(user_id)
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'image_url': user.image_url,
+            'bio': user.bio
+        }), 200
+    return {}, 204
 
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(username=data.get('username')).first()
+    if user and user.authenticate(data.get('password')):
+        session['user_id'] = user.id
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'image_url': user.image_url,
+            'bio': user.bio
+        }), 200
+    return {'error': 'Invalid username or password'}, 401
 
-class Login(Resource):
-    def post(self):
-        data = request.get_json()
-        user = User.query.filter_by(username=data.get('username')).first()
+@app.route('/logout', methods=['DELETE'])
+def logout():
+    session.pop('user_id', None)
+    return {}, 204
 
-        if user and user.authenticate(data.get('password')):
-            session['user_id'] = user.id
-            return user.to_dict(), 200
-
-        return {'error': 'Invalid username or password'}, 401
-
-
-class Logout(Resource):
-    def delete(self):
-        if session.get('user_id'):
-            session['user_id'] = None
-            return {}, 204
-        return {'error': 'Unauthorized'}, 401
-
-
+# Recipe API Resource
 class RecipeIndex(Resource):
     def get(self):
-        user_id = session.get('user_id')
-        if not user_id:
-            return {'error': 'Unauthorized'}, 401
-
         recipes = Recipe.query.all()
-        return [recipe.to_dict() for recipe in recipes], 200
+        return [{
+            'id': r.id,
+            'title': r.title,
+            'instructions': r.instructions,
+            'minutes_to_complete': r.minutes_to_complete,
+            'user': {
+                'id': r.user.id,
+                'username': r.user.username,
+                'image_url': r.user.image_url,
+                'bio': r.user.bio
+            }
+        } for r in recipes], 200
 
     def post(self):
         user_id = session.get('user_id')
@@ -80,31 +124,32 @@ class RecipeIndex(Resource):
             return {'error': 'Unauthorized'}, 401
 
         data = request.get_json()
+        if len(data.get('instructions', '')) < 50:
+            return {'error': 'Instructions must be at least 50 characters long'}, 422
 
-        try:
-            recipe = Recipe(
-                title=data['title'],
-                instructions=data['instructions'],
-                minutes_to_complete=data['minutes_to_complete'],
-                user_id=user_id
-            )
+        recipe = Recipe(
+            title=data['title'],
+            instructions=data['instructions'],
+            minutes_to_complete=data['minutes_to_complete'],
+            user_id=user_id
+        )
+        db.session.add(recipe)
+        db.session.commit()
 
-            db.session.add(recipe)
-            db.session.commit()
+        return {
+            'id': recipe.id,
+            'title': recipe.title,
+            'instructions': recipe.instructions,
+            'minutes_to_complete': recipe.minutes_to_complete,
+            'user': {
+                'id': recipe.user.id,
+                'username': recipe.user.username,
+                'image_url': recipe.user.image_url,
+                'bio': recipe.user.bio
+            }
+        }, 201
 
-            return recipe.to_dict(), 201
-
-        except Exception as e:
-            db.session.rollback()
-            return {'errors': [str(e)]}, 422
-
-
-api.add_resource(Signup, '/signup', endpoint='signup')
-api.add_resource(CheckSession, '/check_session', endpoint='check_session')
-api.add_resource(Login, '/login', endpoint='login')
-api.add_resource(Logout, '/logout', endpoint='logout')
-api.add_resource(RecipeIndex, '/recipes', endpoint='recipes')
-
+api.add_resource(RecipeIndex, '/recipes')
 
 if __name__ == '__main__':
     app.run(port=5555, debug=True)
