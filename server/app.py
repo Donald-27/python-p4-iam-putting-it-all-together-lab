@@ -1,20 +1,13 @@
-from flask import Flask, request, jsonify, session
+# server/extensions.py
 from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
 from flask_bcrypt import Bcrypt
-from flask_restful import Api, Resource
 
-app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'secret'
+db = SQLAlchemy()
+bcrypt = Bcrypt()
 
-bcrypt = Bcrypt(app)
-db = SQLAlchemy(app)
-migrate = Migrate(app, db)
-api = Api(app)
+# server/models.py
+from extensions import db, bcrypt
 
-# Models
 class User(db.Model):
     __tablename__ = 'users'
 
@@ -37,6 +30,7 @@ class User(db.Model):
     def authenticate(self, password):
         return bcrypt.check_password_hash(self._password_hash, password.encode('utf-8'))
 
+
 class Recipe(db.Model):
     __tablename__ = 'recipes'
 
@@ -46,7 +40,24 @@ class Recipe(db.Model):
     minutes_to_complete = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
-# Auth routes
+# server/app.py
+from flask import Flask, request, jsonify, session
+from flask_migrate import Migrate
+from flask_restful import Api, Resource
+from models import db, User, Recipe
+from extensions import bcrypt
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'secret'
+
+# Initialize extensions
+db.init_app(app)
+bcrypt.init_app(app)
+migrate = Migrate(app, db)
+api = Api(app)
+
 @app.route('/signup', methods=['POST'])
 def signup():
     data = request.get_json()
@@ -101,22 +112,28 @@ def logout():
     session.pop('user_id', None)
     return {}, 204
 
-# Recipe API Resource
 class RecipeIndex(Resource):
     def get(self):
-        recipes = Recipe.query.all()
-        return [{
-            'id': r.id,
-            'title': r.title,
-            'instructions': r.instructions,
-            'minutes_to_complete': r.minutes_to_complete,
-            'user': {
-                'id': r.user.id,
-                'username': r.user.username,
-                'image_url': r.user.image_url,
-                'bio': r.user.bio
+        user_id = session.get('user_id')
+        if not user_id:
+            return {'error': 'Unauthorized'}, 401
+
+        recipes = Recipe.query.filter_by(user_id=user_id).all()
+        return [
+            {
+                'id': r.id,
+                'title': r.title,
+                'instructions': r.instructions,
+                'minutes_to_complete': r.minutes_to_complete,
+                'user': {
+                    'id': r.user.id,
+                    'username': r.user.username,
+                    'image_url': r.user.image_url,
+                    'bio': r.user.bio
+                }
             }
-        } for r in recipes], 200
+            for r in recipes
+        ], 200
 
     def post(self):
         user_id = session.get('user_id')
