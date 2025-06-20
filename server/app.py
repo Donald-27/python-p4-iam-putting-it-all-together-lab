@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify, session
 from flask_migrate import Migrate
 from flask_restful import Resource, Api
 from server.extensions import db, bcrypt
+
+
 from server.models import User, Recipe
 
 app = Flask(__name__)
